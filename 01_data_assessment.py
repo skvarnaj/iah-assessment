@@ -1,4 +1,4 @@
-"""Find 2022 Excellence in Healthcare Winner
+"""Find 2022 Excellence in Healthcare Winners
 
 :authors: Joe Skvarna
 :date: 11/29/2023
@@ -18,7 +18,7 @@ input_measures = path.join(main, "IHA DA Challenge Instructions/measure_list_my2
 ################################################################
 # create functions
 def merge_validate(df_left, df_right, valid):
-    """Creates a merged dataframe on measure code via left merge. Validates that all records from both df's merged.
+    """Creates a merged dataframe on measure_code via left merge. Validates that all records from both df's merged.
     
     Args:
         df_left (df): left df to use for merge
@@ -27,7 +27,7 @@ def merge_validate(df_left, df_right, valid):
         
     
     Returns:
-        A new dataframe with given name
+        A new, merged dataframe
     """
     
     df = pd.merge(df_left, df_right, on='measure_code', how='left', indicator=True, validate=(valid))
@@ -52,11 +52,10 @@ def get_unique_list(df, colname):
 
 ################################################################
 # start task
-# 0.1 Read in data files
+# 0.1 Read in both data files
 df_awards = pd.read_csv(input_awards)
-df_measures = pd.read_csv(input_measures)
 
-# assert measure is unique in measures data
+df_measures = pd.read_csv(input_measures)
 assert df_measures['measure_code'].is_unique
 
 # 0.2 Merge data files together
@@ -74,6 +73,7 @@ df_main_lwr_better = df_main.loc[df_main['higher_is_better'] == False]
 lst_lwr_better = get_unique_list(df_main_lwr_better, 'measure_code')
 
 # use measure_list.csv and double check with max rate by measure to see whether a measure is on a 0-100 percent scale or is continuous (money column)
+# double check 50 column
 # calculate max rate by measure
 df_main['max_measure_rate'] = df_main.groupby('measure_code')['rate'].transform('max')
 
@@ -99,11 +99,11 @@ df_same = df_main[['measure_code', 'rate_old', 'rate', 'higher_is_better']].loc[
 assert df_changed['higher_is_better'].all() == False
 assert (df_same['higher_is_better'].all() == True) | ((df_same['rate'] == 50).any())
 
-# assert measures changed matches our measures where higher is worse
+# assert measures changed matches our measures where higher was worse
 lst_measures_rate_chng = get_unique_list(df_changed, 'measure_code')
 assert lst_lwr_better == lst_measures_rate_chng
 
-# change higher is better to True for all after ensuring directionality
+# change higher is better to True for all after changing/ensuring directionality
 df_main['higher_is_better'] = True
 df_main = df_main.drop(['max_measure_rate'], axis = 1)
 
@@ -124,6 +124,7 @@ df_main['valid'].describe()
 
 
 # 2.1 create min, max, avg rate by measure using only valid records
+# create valid df and group by measure
 df_valid = df_main.loc[df_main['valid'] == 1]
 
 df_valid_measures = df_valid.groupby('measure_code').agg(
@@ -131,11 +132,9 @@ df_valid_measures = df_valid.groupby('measure_code').agg(
     measure_global_max =('rate', 'max'),
     measure_global_min = ('rate', 'min'))
 
-# merge min, max, avg values back onto main dataframe
+# merge min, max, avg values back onto main df
+# option: merge back onto df_valid here. Then at end of step 2.3, merge back onto main df.
 df_main_rates = merge_validate(df_main, df_valid_measures, 'm:1')
-
-# summarize avg_measure_rate by measure
-df_main_rates[['measure_code', 'measure_global_avg']].value_counts()
 
 # 2.2 calculate difference between rate and global average at po level
 # FLAG: should I put rate and rate_difference as missing up here first? I want to treat the transform below to skip over missings
@@ -145,16 +144,13 @@ df_main_rates['rate_difference'] = df_main_rates['rate'] - df_main_rates['measur
 # calculate average difference by provider and domain
 df_main_rates['avg_rate_diff_domain'] = df_main_rates.groupby(['po_id', 'domain'])['rate_difference'].transform('mean')
 
-# take a look at the unique df
-df_unique = df_main_rates[['po_id', 'domain', 'avg_rate_diff_domain']].drop_duplicates()
-df_unique.sort_values('po_id')
-
 # set rate to missing if it wasn't valid
+# should maybe move this to right before 2.2
 mask = (df_main['valid'] == 0)
 df_main_rates.loc[mask,'rate'] = np.nan
 
-# 2.4 calculate the imputed rate for invalid or missing measures using the POʼs Average Measure Rate Difference
-# fill in where rate_diff is missing
+# 2.4 calculate the imputed rate for invalid or missing measures using avg_rate_diff_domain
+# fill in where rate is missing
 # imputed rate = measure_global_avg + avg_rate_diff_domain
 mask = (df_main_rates['valid'] == 0)
 df_main_rates.loc[mask, 'rate'] = df_main_rates['measure_global_avg'] + df_main_rates['avg_rate_diff_domain']
@@ -175,9 +171,9 @@ df_main_rates['num_valid_in_domain'] = df_main_rates.groupby(['po_id', 'domain']
 df_main_rates['domain_total_obs'] = df_main_rates.groupby(['po_id', 'domain'])['domain'].transform('count')
 
 # want to remove records where this ratio is 1/2 BUT
-# if a half score is 7/15 (i.e. no opportunity for percet even), we round up to pass
+# if a half score isn't possible  (i.e. 7/15 has no opportunity for percet even), we round up to pass
 # to accomplish this, I will substract 1 from the denominator when the denominator is odd
-mask = df_main_rates['domain_total_obs'] % 2 != 1
+mask = df_main_rates['domain_total_obs'] % 2 != 0
 df_main_rates.loc[mask, 'domain_total_obs'] = df_main_rates['domain_total_obs'] - 1
 
 # now, I can cut off at .5 (50% valid)
@@ -187,7 +183,7 @@ df_final = df_main_rates[df_main_rates['valid_ratio'] >= .5]
 
 
 # 3.0 Now all rates are valid and we are only working with valid po's
-# 3.1 calculate composite score - avg rate by po and domain
+# 3.1 calculate composite score: avg rate by po and domain
 df_final['composite_score'] = df_final.groupby(['po_id', 'domain'])['rate'].transform('mean')
 
 # 3.2 calculate global median of composite score by domain
@@ -209,11 +205,15 @@ df_winner = df_winner[df_winner['unique_count'] == 3]
 
 # drop duplicates since we just want org name and po
 df_winners_unique = df_winner[['org_name', 'po_id']].drop_duplicates()
+df_winners_unique = df_winners_unique.sort_values('org_name')
 
+# output winners to txt file
 num_winners = len(df_winners_unique)
 num_total = len(df_awards[['org_name', 'po_id']].drop_duplicates())
 
-print(f"{num_winners}/{num_total} organizations are Excellence in Healthcare Winners in 2022!\n")
-print("The list of winners is below: \n")
-print(df_winners_unique)
+with open('/Users/joeskvarna/Desktop/IAH Assessment/readme.txt', 'w') as f:
+    f.write(f"{num_winners}/{num_total} organizations are Excellence in Healthcare Winners in 2022!\n")
+    f.write("The list of winners in alphabetical order are below: \n \n")
+    str_df= df_winners_unique.to_string(header=True, index=False)
+    f.write(str_df)
 
