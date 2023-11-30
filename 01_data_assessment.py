@@ -81,7 +81,7 @@ df_main['max_measure_rate'] = df_main.groupby('measure_code')['rate'].transform(
 df_main = df_main.rename(columns={'rate': 'rate_old'})
 df_main['rate'] = df_main['rate_old']
 
-# set percent measures (max_rate <= 100) to 100 - rate
+# set percent measures (max_rate <= 100) to 100 - rate where lower is better
 mask = (df_main['higher_is_better'] == False) & (df_main['max_measure_rate'] <= 100)
 df_main.loc[mask, 'rate'] = 100 - df_main['rate_old']
 
@@ -99,7 +99,7 @@ df_same = df_main[['measure_code', 'rate_old', 'rate', 'higher_is_better']].loc[
 assert df_changed['higher_is_better'].all() == False
 assert (df_same['higher_is_better'].all() == True) | ((df_same['rate'] == 50).any())
 
-# assert measures changed matches our measures where higher was worse
+# assert measures changed matches our measures where lower was better
 lst_measures_rate_chng = get_unique_list(df_changed, 'measure_code')
 assert lst_lwr_better == lst_measures_rate_chng
 
@@ -112,9 +112,9 @@ df_main = df_main.drop(['max_measure_rate'], axis = 1)
 # create valid column
 df_main['valid'] = 1
 
-# create invalid condition and assert rate is never missing
-mask = (df_main['denominator'] <= 30) | (df_main['reliability'] <= .7)
+# assert rate is never missing and create invalid condition
 assert df_main['rate'].isna().all() == False
+mask = (df_main['denominator'] <= 30) | (df_main['reliability'] <= .7)
 df_main.loc[mask, 'valid'] = 0 
 
 # summarize valid response column
@@ -132,21 +132,30 @@ df_valid_measures = df_valid.groupby('measure_code').agg(
     measure_global_max =('rate', 'max'),
     measure_global_min = ('rate', 'min'))
 
-# merge min, max, avg values back onto main df
-# option: merge back onto df_valid here. Then at end of step 2.3, merge back onto main df.
-df_main_rates = merge_validate(df_main, df_valid_measures, 'm:1')
+# merge min, max, avg values onto main df with valid and invalid records
+df_main_measures = merge_validate(df_valid, df_valid_measures, 'm:1')
 
-# 2.2 calculate difference between rate and global average at po level
-# FLAG: should I put rate and rate_difference as missing up here first? I want to treat the transform below to skip over missings
-df_main_rates['rate_difference'] = df_main_rates['rate'] - df_main_rates['measure_global_avg']
+# take only valid records from this dataset
+df_valid_rates = df_main_measures.loc[df_main_measures['valid'] == 1]
 
-# 2.3 calculate po's avg rate difference for each domain (clinical quality and patient experiene)
-# calculate average difference by provider and domain
-df_main_rates['avg_rate_diff_domain'] = df_main_rates.groupby(['po_id', 'domain'])['rate_difference'].transform('mean')
+# 2.2 calculate difference between rate and global average at po level using valid dataset
+df_valid_rates['rate_difference'] = df_valid_rates['rate'] - df_valid_rates['measure_global_avg']
 
-# set rate to missing if it wasn't valid
-# should maybe move this to right before 2.2
-mask = (df_main['valid'] == 0)
+# 2.3 calculate po's avg rate difference for each domain
+# calculate average difference by provider and domain using valid dataset
+df_valid_rates['avg_rate_diff_domain'] = df_valid_rates.groupby(['po_id', 'domain'])['rate_difference'].transform('mean')
+
+# create a dataset to add avg_rate_diff_domain to our invalid records
+df_valid_grouped = df_valid_rates[['po_id', 'domain', 'avg_rate_diff_domain']].drop_duplicates()
+
+# merge onto main dataset
+df_main_rates = pd.merge(df_main_measures, df_valid_grouped, on=['po_id', 'domain'], how='left', indicator=True, validate = ('m:1'))
+assert (df_main_rates['_merge'] == 'both').all()
+df_main_rates = df_main_rates.drop(columns=['_merge'])
+
+# now we have avg_rate_diff_domain for all po and domain but we only used valid records to calculate it
+# set rate to missing if not valid
+mask = (df_main_rates['valid'] == 0)
 df_main_rates.loc[mask,'rate'] = np.nan
 
 # 2.4 calculate the imputed rate for invalid or missing measures using avg_rate_diff_domain
@@ -155,6 +164,7 @@ df_main_rates.loc[mask,'rate'] = np.nan
 mask = (df_main_rates['valid'] == 0)
 df_main_rates.loc[mask, 'rate'] = df_main_rates['measure_global_avg'] + df_main_rates['avg_rate_diff_domain']
 
+# no missing values for rate after imputation
 assert df_main_rates['rate'].isna().any() == False
 
 # if imputed rate is greater than global measure max, set to max
@@ -170,8 +180,10 @@ df_main_rates.loc[mask, 'rate'] = df_main_rates['measure_global_min']
 df_main_rates['num_valid_in_domain'] = df_main_rates.groupby(['po_id', 'domain'])['valid'].transform('sum')
 df_main_rates['domain_total_obs'] = df_main_rates.groupby(['po_id', 'domain'])['domain'].transform('count')
 
-# want to remove records where this ratio is 1/2 BUT
-# if a half score isn't possible  (i.e. 7/15 has no opportunity for percet even), we round up to pass
+df_main_rates[['domain', 'num_valid_in_domain', 'domain_total_obs']].value_counts()
+
+# remove records where this ratio is less than 1/2 BUT
+# if exact 1/2 score isn't possible  (i.e. 7/15 has no opportunity for percet even), we round up
 # to accomplish this, I will substract 1 from the denominator when the denominator is odd
 mask = df_main_rates['domain_total_obs'] % 2 != 0
 df_main_rates.loc[mask, 'domain_total_obs'] = df_main_rates['domain_total_obs'] - 1
